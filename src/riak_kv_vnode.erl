@@ -2496,8 +2496,7 @@ encode_handoff_item({B, K}, V) ->
         Value  = riak_object:to_binary_version(?CAP_OBJECT_FORMAT, B, K, V),
         encode_binary_object(B, K, Value)
     catch Error:Reason ->
-            ?LOG_WARNING("Handoff encode failed: ~p:~p",
-                          [Error,Reason]),
+            ?LOG_WARNING("Handoff encode failed: ~p:~p", [Error,Reason]),
             corrupted
     end.
 
@@ -4083,7 +4082,7 @@ decode_binary_object(BinaryObject) ->
 
 encode_binary_object(Bucket, Key, Value) ->
     encode_raw = handoff_data_encoding_method(),
-    EncodedObject = { Bucket, Key, iolist_to_binary(Value) },
+    EncodedObject = {Bucket, Key, Value},
     return_encoded_binary_object(encode_raw, EncodedObject).
 
 %% Return objects in a consistent form:

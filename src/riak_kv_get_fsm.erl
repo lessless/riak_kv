@@ -39,22 +39,33 @@
             waiting_vnode_r/2,
             waiting_read_repair/2]).
 
--type detail() :: timing |
-                  vnodes.
+-type detail() :: timing | vnodes.
 -type details() :: [detail()].
 
--type option() :: {r, pos_integer()} |         %% Minimum number of successful responses
-                  {pr, non_neg_integer()} |    %% Minimum number of primary vnodes participating
-                  {basic_quorum, boolean()} |  %% Whether to use basic quorum (return early
-                                               %% in some failure cases.
-                  {notfound_ok, boolean()}  |  %% Count notfound responses as successful.
-                  {timeout, pos_integer() | infinity} | %% Timeout for vnode responses
-                  {details, details()} |       %% Return extra details as a 3rd element
-                  {details, true} |
-                  details |
-                  {sloppy_quorum, boolean()} | %% default = true
-                  {n_val, pos_integer()} |     %% default = bucket props
-                  {crdt_op, true | undefined}. %% default = undefined
+-type option() ::
+    {r, pos_integer()} |
+        %% Minimum number of successful responses
+    {pr, non_neg_integer()} |
+        %% Minimum number of primary vnodes participating
+    {basic_quorum, boolean()} |
+        %% Whether to use basic quorum (return early in some failure cases).
+    {notfound_ok, boolean()}  |
+        %% Count notfound responses as successful.
+    {timeout, pos_integer() | infinity} |
+        %% Timeout for vnode responses
+    {details, details()} |
+    {details, true} |
+    details |
+        %% Return extra details as a 3rd element
+    {sloppy_quorum, boolean()} |
+        %% default = true
+    {n_val, pos_integer()} |
+        %% default = bucket props
+    {crdt_op, true | undefined} |
+        %% default = undefined
+    {force_repair, boolean()}
+        %% Override soft and hard limit on read repair
+    .
 
 -type options() :: [option()].
 -type req_id() :: non_neg_integer().
@@ -85,7 +96,8 @@
                 request_type :: undefined | request_type(),
                 override_vnodes = [] :: list(),
                 return_tombstone = false :: boolean(),
-                expected_fetchclock = false :: false | vclock:vclock()
+                expected_fetchclock = false :: false | vclock:vclock(),
+                force_repair = false :: boolean()
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -294,15 +306,19 @@ prepare(timeout, StateData=#state{bkey=BKey={Bucket,_Key},
                 end,
             RequestType = ?CAP_GETREQUEST_TYPE,
             
-            new_state_timeout(validate,
-                                StateData#state{
-                                            starttime=riak_core_util:moment(),
-                                            n = N,
-                                            bucket_props=Props,
-                                            preflist2 = Preflist2,
-                                            tracked_bucket = StatTracked,
-                                            crdt_op = CrdtOp,
-                                            request_type=RequestType})
+            new_state_timeout(
+                validate,
+                StateData#state{
+                    starttime=riak_core_util:moment(),
+                    n = N,
+                    bucket_props=Props,
+                    preflist2 = Preflist2,
+                    tracked_bucket = StatTracked,
+                    crdt_op = CrdtOp,
+                    request_type=RequestType,
+                    force_repair = get_option(force_repair, Options, false)
+                }
+            )
     end.
 
 %% @private
@@ -661,7 +677,13 @@ using_custom_n_val(#state{n=N, bucket_props=BucketProps}) ->
 maybe_read_repair(Indices, RepairObj, UpdStateData) ->
     HardCap = app_helper:get_env(riak_kv, read_repair_max),
     SoftCap = app_helper:get_env(riak_kv, read_repair_soft, HardCap),
-    Dorr = determine_do_read_repair(SoftCap, HardCap),
+    Dorr =
+        case UpdStateData#state.force_repair of
+            true ->
+                true;
+            _ ->
+                determine_do_read_repair(SoftCap, HardCap)
+        end,
     if
         Dorr ->
             read_repair(Indices, RepairObj, UpdStateData);
@@ -669,6 +691,7 @@ maybe_read_repair(Indices, RepairObj, UpdStateData) ->
             ok = riak_kv_stat:update(skipped_read_repairs),
             skipping
     end.
+
 
 determine_do_read_repair(_SoftCap, HardCap) when HardCap == undefined ->
     true;

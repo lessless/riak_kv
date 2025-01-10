@@ -184,18 +184,21 @@ expected_aae_state(ExchangeState) ->
             boolean(),
             erlang:timestamp()) ->
     fun((keyclock_list()) -> ok).
-prompt_readrepair(VnodeList, IndexN, MaxResults,
-                    LoopCount, Rehash, StartTime) ->
-    prompt_readrepair(VnodeList,
-                        IndexN,
-                        MaxResults,
-                        LoopCount,
-                        StartTime,
-                        Rehash,
-                        app_helper:get_env(riak_kv, log_readrepair, false)).
+prompt_readrepair(
+        VnodeList, IndexN, MaxResults, LoopCount, Rehash, StartTime) ->
+    prompt_readrepair(
+        VnodeList,
+        IndexN,
+        MaxResults,
+        LoopCount,
+        StartTime,
+        Rehash,
+        app_helper:get_env(riak_kv, log_readrepair, false)
+    ).
 
-prompt_readrepair(VnodeList, IndexN, MaxResults, 
-                    LoopCount, StartTime, Rehash, LogRepair) ->
+prompt_readrepair(
+    VnodeList, IndexN, MaxResults, 
+        LoopCount, StartTime, Rehash, LogRepair) ->
     {ok, C} = riak:local_client(),
     FetchFun = 
         fun({{B, K}, {_BlueClock, _PinkClock}}) ->
@@ -203,20 +206,21 @@ prompt_readrepair(VnodeList, IndexN, MaxResults,
                 true ->
                     riak_kv_exchange_fsm:repair_consistent({B, K});
                 false ->
-                    riak_client:get(B, K, C)
+                    riak_client:get(B, K, [{force_repair, true}], C)
             end
         end,
     LogFun = 
         fun({{B, K}, {BlueClock, PinkClock}}) ->
             ?LOG_INFO(
                 "Prompted read repair Bucket=~p Key=~p Clocks ~w ~w",
-                    [B, K, BlueClock, PinkClock])
+                [B, K, BlueClock, PinkClock]
+            )
         end,
     fun(RepairList) ->
         SW = os:timestamp(),
         RepairCount = length(RepairList),
-        ?LOG_INFO("Repairing key_count=~w between ~w",
-                    [RepairCount, VnodeList]),
+        ?LOG_INFO(
+            "Repairing key_count=~w between ~w", [RepairCount, VnodeList]),
         Pause =
             max(?MIN_REPAIRPAUSE_MS,
                 ?MIN_REPAIRTIME_MS div max(1, RepairCount)),
@@ -239,22 +243,28 @@ prompt_readrepair(VnodeList, IndexN, MaxResults,
                 ok
         end,
         EndTime = os:timestamp(),
-        ?LOG_INFO("Repaired key_count=~w " ++ 
-                        "in repair_time=~w ms with pause_time=~w ms " ++
-                        "total process_time=~w ms",
-                    [RepairCount,
-                        timer:now_diff(EndTime, SW) div 1000,
-                        RepairCount * Pause,
-                        timer:now_diff(EndTime, StartTime) div 1000]),
+        ?LOG_INFO(
+            "Repaired key_count=~w " ++ 
+            "in repair_time=~w ms with pause_time=~w ms " ++
+            "total process_time=~w ms",
+            [
+                RepairCount,
+                timer:now_diff(EndTime, SW) div 1000,
+                RepairCount * Pause,
+                timer:now_diff(EndTime, StartTime) div 1000
+            ]
+        ),
         case LoopCount of
             LoopCount when LoopCount > 0 ->
                 case analyse_repairs(RepairList, MaxResults) of
                     {false, none} ->
-                        ?LOG_INFO("Repair cycle type=false at LoopCount=~w",
-                                    [LoopCount]);
+                        ?LOG_INFO(
+                            "Repair cycle type=false at LoopCount=~w", [LoopCount]);
                     {FilterType, Filter} ->
-                        ?LOG_INFO("Repair cycle type=~p at LoopCount=~w",
-                                    [FilterType, LoopCount]),
+                        ?LOG_INFO(
+                            "Repair cycle type=~p at LoopCount=~w",
+                            [FilterType, LoopCount]
+                        ),
                         [LocalVnode, RemoteVnode] = VnodeList,
                         ReplyFun =
                             fun(ExchangeResult) ->
@@ -270,8 +280,10 @@ prompt_readrepair(VnodeList, IndexN, MaxResults,
                             ReplyFun, Filter)
                 end;
             LoopCount ->
-                ?LOG_INFO("Repair cycle type=complete at LoopCount=~w",
-                                [LoopCount])
+                ?LOG_INFO(
+                    "Repair cycle type=complete at LoopCount=~w",
+                    [LoopCount]
+                )
         end              
     end.
 
