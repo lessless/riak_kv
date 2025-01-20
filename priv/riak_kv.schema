@@ -51,6 +51,23 @@
   hidden
 ]}.
 
+%% @doc Defer the fetching of objects during repair handoff
+%% Should the fetching of objects be deferred during repair handoff until
+%% after the Filter function (to confirm that the Key is required has passed).
+%%
+%% This is only relevant with the leveled backend - and will switch the object
+%% fold from a fold over the journal in sqn_order (which is relatively
+%% efficient) in terms if disk read performance, to a fold over the heads in
+%% the ledger with a deferred fetch - which is efficient should the Filter
+%% pass on a significant number of keys.
+%%
+%% Option commonly enabled with `repair_span = double_pair`
+{mapping, "repair_deferred", "riak_kv.repair_deferred", [
+  {datatype, {flag, enabled, disabled}},
+  {default, disabled},
+  {commented, disabled}
+]}.
+
 %% @doc A path under which aae data files will be stored.
 {mapping, "tictacaae_dataroot", "riak_kv.tictacaae_dataroot", [
   {default, "$(platform_data_dir)/tictac_aae"},
