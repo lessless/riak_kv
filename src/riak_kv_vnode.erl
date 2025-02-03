@@ -2569,8 +2569,7 @@ delete(State=#state{status_mgr_pid=StatusMgr, mod=Mod, modstate=ModState}) ->
                     tictac_aae = false,
                     aae_controller = undefined}}.
 
-terminate(_Reason, #state{idx=Idx, 
-                            mod=Mod, modstate=ModState, 
+terminate(_Reason, #state{mod=Mod, modstate=ModState, 
                             hashtrees=Trees, 
                             tictac_aae=TicTacAAE, aae_controller=Cntrl}) ->
     
@@ -2588,7 +2587,6 @@ terminate(_Reason, #state{idx=Idx,
             %% to disk causing the hashtree to be closed dirty.
             riak_kv_index_hashtree:sync_stop(Trees)
     end,
-    riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
 
 handle_info({{w1c_async_put, From, Type, Bucket, Key, EncodedVal, StartTS} = _Context, Reply},
