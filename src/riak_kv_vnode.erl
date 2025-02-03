@@ -3334,11 +3334,11 @@ do_get(_Sender, BKey, ReqID,
 %% @private
 do_head(_Sender, BKey, ReqID,
        State=#state{idx=Idx, mod=Mod, modstate=ModState}) ->
-    StartTS = os:timestamp(),
+    % StartTS = os:timestamp(),
     {Retval, ModState1} = do_head_term(BKey, Mod, ModState),
     State1 = State#state{modstate=ModState1},
     {Retval1, State3} = handle_returned_value(BKey, Retval, State1),
-    update_vnode_stats(vnode_head, Idx, StartTS),
+    % update_vnode_stats(vnode_head, Idx, StartTS),
     {reply, {r, Retval1, Idx, ReqID}, State3}.
 
 %% @private
