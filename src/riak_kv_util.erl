@@ -677,8 +677,6 @@ summarise_process_memory_by_initial_call(TopN) when is_list(TopN) ->
         )
     ).
 
-%% @doc profile_riak/1
-%% Run eprof for ProfileTime milliseconds.  Will have an impact, so normally
 %% best to restrict ProfileTime to 100ms.  May fail on systems under heavy load
 -spec profile_riak(pos_integer()) -> analyzed|failed.
 profile_riak(ProfileTime) ->

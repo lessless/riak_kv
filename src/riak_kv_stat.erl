@@ -26,11 +26,6 @@
 %%      Update each stat with the exported function update/1. Add
 %%      a new stat to the internal stats/0 func to register a new stat with
 %%      folsom.
-%%
-%%      Get the latest aggregation of stats with the exported function
-%%      get_stats/0. Or use folsom_metrics:get_metric_value/1,
-%%      or riak_core_stat_q:get_stats/1.
-%%
 
 -module(riak_kv_stat).
 
@@ -66,7 +61,6 @@ start_link() ->
 register_stats() ->
     riak_core_stat:register_stats(?APP, stats()).
 
-
 %% @spec get_stats() -> proplist()
 %% @doc Get the current aggregation of stats.
 get_stats() ->
@@ -97,11 +91,21 @@ untrack_bucket(Bucket) when is_binary(Bucket) ->
 
 %% The current number of active get fsms in riak
 active_gets() ->
-    counter_value([?PFX, ?APP, node, gets, fsm, active]).
+    case application:get_env(riak_kv, get_fsm_active_counter, none) of
+        none ->
+            counter_value([?PFX, ?APP, node, gets, fsm, active]);
+        CRef ->
+            counters:get(CRef, 1)
+    end.
 
 %% The current number of active put fsms in riak
 active_puts() ->
-    counter_value([?PFX, ?APP, node, puts, fsm, active]).
+    case application:get_env(riak_kv, put_fsm_active_counter, none) of
+        none ->
+            counter_value([?PFX, ?APP, node, puts, fsm, active]);
+        CRef ->
+            counters:get(CRef, 1)
+    end.
 
 counter_value(Name) ->
     case exometer:get_value(Name, [value]) of
@@ -1046,7 +1050,7 @@ create_or_update_histogram_test() ->
         Metric = [riak_kv,put_fsm,counter,time],
         ok = repeat_create_or_update(Metric, 1, histogram, 100),
         ?assertNotEqual(exometer:get_value(Metric), 0),
-        Stats = get_stats(),
+        Stats = riak_kv_status:get_stats(web),
         ?LOG_INFO("stats prop list ~s", [Stats]),
         ?assertNotEqual(proplists:get_value({node_put_fsm_counter_time_mean}, Stats), 0)
     after
