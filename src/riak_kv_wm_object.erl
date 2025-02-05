@@ -189,11 +189,7 @@
     }
 ).
 
--ifdef(namespaced_types).
--type riak_kv_wm_object_dict() :: dict:dict().
--else.
--type riak_kv_wm_object_dict() :: dict().
--endif.
+-type riak_kv_wm_object_dict() :: map().
 
 -include_lib("webmachine/include/webmachine.hrl").
 -include("riak_kv_wm_raw.hrl").
@@ -673,7 +669,7 @@ charsets_provided(RD, Ctx0) ->
         {ok, _} ->
             case select_doc(DocCtx) of
                 {MD, _} ->
-                    case dict:find(?MD_CHARSET, MD) of
+                    case riak_object:metadata_find(?MD_CHARSET, MD) of
                         {ok, CS} ->
                             {[{CS, fun(X) -> X end}], RD, DocCtx};
                         error ->
@@ -698,7 +694,7 @@ encodings_provided(RD, Ctx0) ->
         {ok, _} ->
             case select_doc(DocCtx) of
                 {MD, _} ->
-                    case dict:find(?MD_ENCODING, MD) of
+                    case riak_object:metadata_find(?MD_ENCODING, MD) of
                         {ok, Enc} ->
                             {[{Enc, fun(X) -> X end}], RD, DocCtx};
                         error ->
@@ -762,7 +758,9 @@ resource_exists(RD, Ctx0) ->
                             MDs = riak_object:get_metadatas(Doc),
                             {lists:any(
                                     fun(M) ->
-                                        dict:fetch(?MD_VTAG, M) =:= Vtag
+                                        riak_object:metadata_get(
+                                            ?MD_VTAG, M)
+                                            =:= Vtag
                                     end,
                                     MDs),
                                 RD,
@@ -879,23 +877,26 @@ accept_doc_body(
         }) ->
     Doc0 = riak_object:new(riak_kv_wm_utils:maybe_bucket_type(T,B), K, <<>>),
     VclockDoc = riak_object:set_vclock(Doc0, decode_vclock_header(RD)),
-    UserMeta = extract_user_meta(RD),
-    CTypeMD = dict:store(?MD_CTYPE, CType, dict:new()),
+    InitMetaData =
+        #{
+            ?MD_CTYPE => CType,
+            ?MD_LINKS => L,
+            ?MD_USERMETA => extract_user_meta(RD),
+            ?MD_INDEX => IF
+        },
     CharsetMD =
         if Charset /= undefined ->
-                dict:store(?MD_CHARSET, Charset, CTypeMD);
+                riak_object:metadata_update(?MD_CHARSET, Charset, InitMetaData);
             true ->
-                CTypeMD
+                InitMetaData
         end,
     EncMD =
         case wrq:get_req_header(?HEAD_ENCODING, RD) of
             undefined -> CharsetMD;
-            E -> dict:store(?MD_ENCODING, E, CharsetMD)
+            E -> riak_object:metadata_update(?MD_ENCODING, E, CharsetMD)
         end,
-    LinkMD = dict:store(?MD_LINKS, L, EncMD),
-    UserMetaMD = dict:store(?MD_USERMETA, UserMeta, LinkMD),
-    IndexMD = dict:store(?MD_INDEX, IF, UserMetaMD),
-    MDDoc = riak_object:update_metadata(VclockDoc, IndexMD),
+    
+    MDDoc = riak_object:update_metadata(VclockDoc, EncMD),
     Doc =
         riak_object:update_value(
             MDDoc, riak_kv_wm_utils:accept_value(CType, wrq:req_body(RD))),
@@ -1050,7 +1051,7 @@ multiple_choices(RD, Ctx) ->
     %% if it's a tombstone add the X-Riak-Deleted header
     case select_doc(Ctx) of
         {M, _} ->
-            case dict:find(?MD_DELETED, M) of
+            case riak_object:metadata_find(?MD_DELETED, M) of
                 {ok, "true"} ->
                     {false,
                         wrq:set_resp_header(?HEAD_DELETED, "true", RD),
@@ -1081,29 +1082,31 @@ produce_doc_body(RD, Ctx) ->
     case select_doc(Ctx) of
         {MD, Doc} ->
             %% Add links to response...
-            Links1 = case dict:find(?MD_LINKS, MD) of
-                        {ok, L} -> L;
-                        error -> []
-                    end,
+            Links1 =
+                case riak_object:metadata_find(?MD_LINKS, MD) of
+                    {ok, L} -> L;
+                    error -> []
+                end,
             Links2 =
                 riak_kv_wm_utils:format_links(
                     [{Bucket, "up"}|Links1], Prefix, APIVersion),
             LinkRD = wrq:merge_resp_headers(Links2, RD),
 
             %% Add user metadata to response...
-            UserMetaRD = case dict:find(?MD_USERMETA, MD) of
-                        {ok, UserMeta} ->
-                            lists:foldl(
-                                fun({K,V},Acc) ->
-                                    wrq:merge_resp_headers([{K,V}],Acc)
-                                end,
-                                LinkRD, UserMeta);
-                        error -> LinkRD
-                    end,
+            UserMetaRD =
+                case riak_object:metadata_find(?MD_USERMETA, MD) of
+                    {ok, UserMeta} ->
+                        lists:foldl(
+                            fun({K,V},Acc) ->
+                                wrq:merge_resp_headers([{K,V}],Acc)
+                            end,
+                            LinkRD, UserMeta);
+                    error -> LinkRD
+                end,
 
             %% Add index metadata to response...
             IndexRD =
-                case dict:find(?MD_INDEX, MD) of
+                case riak_object:metadata_find(?MD_INDEX, MD) of
                     {ok, IndexMeta} ->
                         lists:foldl(
                         fun({K,V}, Acc) ->
@@ -1132,7 +1135,8 @@ produce_doc_body(RD, Ctx) ->
 %%      values for this document, and giving that user the vtags of those
 %%      values so they can get to them with the vtag query param.
 produce_sibling_message_body(RD, Ctx=#ctx{doc={ok, Doc}}) ->
-    Vtags = [ dict:fetch(?MD_VTAG, M)
+    Vtags =
+        [ riak_object:metadata_get(?MD_VTAG, M)
               || M <- riak_object:get_metadatas(Doc) ],
     {[<<"Siblings:\n">>, [ [V,<<"\n">>] || V <- Vtags]],
      wrq:set_resp_header(?HEAD_CTYPE, "text/plain",
@@ -1172,7 +1176,7 @@ select_doc(#ctx{doc={ok, Doc}, vtag=Vtag}) ->
                 Mult ->
                     case lists:dropwhile(
                            fun({M,_}) ->
-                                dict:fetch(?MD_VTAG, M) /= Vtag
+                                riak_object:metadata_get(?MD_VTAG, M) /= Vtag
                            end,
                            Mult) of
                         [Match|_] -> Match;
@@ -1273,7 +1277,7 @@ md5(Bin) ->
 generate_etag(RD, Ctx) ->
     case select_doc(Ctx) of
         {MD, _} ->
-            {dict:fetch(?MD_VTAG, MD), RD, Ctx};
+            {riak_object:metadata_get(?MD_VTAG, MD), RD, Ctx};
         multiple_choices ->
             {ok, Doc} = Ctx#ctx.doc,
             <<ETag:128/integer>> =
@@ -1303,7 +1307,7 @@ last_modified(RD, Ctx) ->
 %% @doc Extract and convert the Last-Modified metadata into a normalized form
 %%      for use in the last_modified/2 callback.
 normalize_last_modified(MD) ->
-    case dict:fetch(?MD_LASTMOD, MD) of
+    case riak_object:metadata_get(?MD_LASTMOD, MD) of
         Now={_,_,_} ->
             calendar:now_to_universal_time(Now);
         Rfc1123 when is_list(Rfc1123) ->
@@ -1385,7 +1389,7 @@ extract_links_1([], _BucketRegex, _KeyRegex, BucketAcc, KeyAcc) ->
 -spec get_ctype(riak_kv_wm_object_dict(), term()) -> string().
 %% @doc Work out the content type for this object - use the metadata if provided
 get_ctype(MD,V) ->
-    case dict:find(?MD_CTYPE, MD) of
+    case riak_object:metadata_find(?MD_CTYPE, MD) of
         {ok, Ctype} ->
             Ctype;
         error when is_binary(V) ->

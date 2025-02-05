@@ -38,7 +38,8 @@
 -type bucket() :: binary() | {binary(), binary()}.
 %% -type bkey() :: {bucket(), key()}.
 -type value() :: term().
--type riak_object_dict() :: dict:dict().
+-type metadata_key() :: binary()|atom().
+-type riak_object_dict() :: dict:dict()|map().
 
 -record(r_content, {
           metadata :: riak_object_dict(),
@@ -59,7 +60,7 @@
           key :: key(),
           contents :: list(r_content()),
           vclock = vclock:fresh() :: vclock:vclock(),
-          updatemetadata=dict:store(clean, true, dict:new()) :: riak_object_dict(),
+          updatemetadata = #{clean => true} :: riak_object_dict(),
           updatevalue :: term()
          }).
 -record(p_object, {
@@ -112,6 +113,7 @@
 -export([find_bestobject/1]).
 -export([spoof_getdeletedobject/1]).
 -export([delete_hash/1]).
+-export([metadata_find/2, metadata_get/2, metadata_update/3, metadata_present/2, metadata_remove/2]).
 
 -ifdef(TEST).
 -export([convert_object_to_headonly/3]). % Used in unit testing of get_core
@@ -128,9 +130,9 @@ new(B, K, V) when is_binary(B), is_binary(K) ->
 -spec new(Bucket::bucket(), Key::key(), Value::value(),
           string() | riak_object_dict() | no_initial_metadata) -> riak_object().
 new({T, B}, K, V, C) when is_binary(T), is_binary(B), is_binary(K), is_list(C) ->
-    new_int({T, B}, K, V, dict:from_list([{?MD_CTYPE, C}]));
+    new_int({T, B}, K, V, maps:from_list([{?MD_CTYPE, C}]));
 new(B, K, V, C) when is_binary(B), is_binary(K), is_list(C) ->
-    new_int(B, K, V, dict:from_list([{?MD_CTYPE, C}]));
+    new_int(B, K, V, maps:from_list([{?MD_CTYPE, C}]));
 
 %% @doc Constructor for new riak objects with an initial metadata dict.
 %%
@@ -149,7 +151,7 @@ new_int(B, K, V, MD) ->
         false ->
             case MD of
                 no_initial_metadata ->
-                    Contents = [#r_content{metadata=dict:new(), value=V}],
+                    Contents = [#r_content{metadata=maps:new(), value=V}],
                     #r_object{bucket=B,key=K,
                               contents=Contents,vclock=vclock:fresh()};
                 _ ->
@@ -183,8 +185,8 @@ equal(Obj1,Obj2) ->
         andalso vclock:equal(vclock(Obj1),vclock(Obj2))
         andalso equal2(Obj1,Obj2).
 equal2(Obj1,Obj2) ->
-    UM1 = lists:keysort(1, dict:to_list(Obj1#r_object.updatemetadata)),
-    UM2 = lists:keysort(1, dict:to_list(Obj2#r_object.updatemetadata)),
+    UM1 = lists:keysort(1, metadata_list(Obj1#r_object.updatemetadata)),
+    UM2 = lists:keysort(1, metadata_list(Obj2#r_object.updatemetadata)),
     (UM1 =:= UM2)
         andalso (Obj1#r_object.updatevalue =:= Obj2#r_object.updatevalue)
         andalso begin
@@ -196,12 +198,11 @@ equal_contents([],[]) -> true;
 equal_contents(_,[]) -> false;
 equal_contents([],_) -> false;
 equal_contents([C1|R1],[C2|R2]) ->
-    MD1 = lists:keysort(1, dict:to_list(C1#r_content.metadata)),
-    MD2 = lists:keysort(1, dict:to_list(C2#r_content.metadata)),
+    MD1 = lists:keysort(1, metadata_list(C1#r_content.metadata)),
+    MD2 = lists:keysort(1, metadata_list(C2#r_content.metadata)),
     (MD1 =:= MD2)
         andalso (C1#r_content.value =:= C2#r_content.value)
         andalso equal_contents(R1,R2).
-
 
 %% @doc  Given a list of riak_object()s, return the objects that are pure
 %%       ancestors of other objects in the list, if any.  The changes in the
@@ -413,16 +414,74 @@ reconcile(Objects) ->
 most_recent_content(AllContents) ->
     hd(lists:sort(fun compare_content_dates/2, AllContents)).
 
+-spec metadata_get(metadata_key(), riak_object_dict()) -> term().
+metadata_get(Key, Metadata) when is_map(Metadata) ->
+    maps:get(Key, Metadata);
+metadata_get(Key, Metadata) ->
+    dict:fetch(Key , Metadata).
+
+-spec metadata_find(metadata_key(), riak_object_dict()) -> {ok, term()}|error.
+metadata_find(Key, Metadata) when is_map(Metadata) ->
+    case maps:get(Key, Metadata, error) of
+        error ->
+            error;
+        Value ->
+            {ok, Value}
+    end;
+metadata_find(Key, Metadata) ->
+    dict:find(Key , Metadata).
+
+-spec metadata_present(metadata_key(), riak_object_dict()) -> boolean().
+metadata_present(Key, Metadata) when is_map(Metadata) ->
+    maps:is_key(Key, Metadata);
+metadata_present(Key, Metadata) ->
+    dict:is_key(Key, Metadata).
+
+-spec metadata_size(riak_object_dict()) -> non_neg_integer().
+metadata_size(Metadata) when is_map(Metadata) ->
+    maps:size(Metadata);
+metadata_size(Metadata) ->
+    dict:size(Metadata).
+
+-spec metadata_list(riak_object_dict()) -> list().
+metadata_list(Metadata) when is_map(Metadata) ->
+    maps:to_list(Metadata);
+metadata_list(Metadata) ->
+    dict:to_list(Metadata).
+
+-spec metadata_remove(
+    metadata_key(), riak_object_dict()) -> riak_object_dict().
+metadata_remove(Key, Metadata) when is_map(Metadata) ->
+    maps:remove(Key, Metadata);
+metadata_remove(Key, Metadata) ->
+    dict:erase(Key, Metadata).
+
+-spec metadata_update(
+    metadata_key(), term(), riak_object_dict()) -> riak_object_dict().
+metadata_update(Key, Value, Metadata) when is_map(Metadata) ->
+    maps:put(Key, Value, Metadata);
+metadata_update(Key, Value, Metadata) ->
+    dict:store(Key, Value, Metadata).
+
+-spec metadata_fold(
+    fun((metadata_key(), term(), term()) -> term()),
+    term(),
+    riak_object_dict()) -> term().
+metadata_fold(FoldFun, InitAcc, Metadata) when is_map(Metadata) ->
+    maps:fold(FoldFun, InitAcc, Metadata);
+metadata_fold(FoldFun, InitAcc, Metadata) ->
+    dict:fold(FoldFun, InitAcc, Metadata).
+
 compare_content_dates(C1,C2) ->
-    D1 = dict:fetch(<<"X-Riak-Last-Modified">>, C1#r_content.metadata),
-    D2 = dict:fetch(<<"X-Riak-Last-Modified">>, C2#r_content.metadata),
+    D1 = metadata_get(<<"X-Riak-Last-Modified">>, C1#r_content.metadata),
+    D2 = metadata_get(<<"X-Riak-Last-Modified">>, C2#r_content.metadata),
     %% true if C1 was modifed later than C2
     Cmp1 = riak_core_util:compare_dates(D1, D2),
     %% true if C2 was modifed later than C1
     Cmp2 = riak_core_util:compare_dates(D2, D1),
     %% check for deleted objects
-    Del1 = dict:is_key(<<"X-Riak-Deleted">>, C1#r_content.metadata),
-    Del2 = dict:is_key(<<"X-Riak-Deleted">>, C2#r_content.metadata),
+    Del1 = metadata_present(<<"X-Riak-Deleted">>, C1#r_content.metadata),
+    Del2 = metadata_present(<<"X-Riak-Deleted">>, C2#r_content.metadata),
 
     SameDate = (Cmp1 =:= Cmp2),
     case {SameDate, Del1, Del2} of
@@ -461,7 +520,7 @@ merge(OldObject=#r_object{}, NewObject=#r_object{}) ->
             OldObject#r_object{contents=Contents,
                 vclock=vclock:merge([OldObject#r_object.vclock,
                     NewObj1#r_object.vclock]),
-                updatemetadata=dict:store(clean, true, dict:new()),
+                updatemetadata = #{clean => true},
                 updatevalue=undefined}
     end.
 
@@ -526,15 +585,15 @@ compare(A=#r_content{value=VA}, B=#r_content{value=VB}) ->
 %% @see compare/2
 %% @see lists:usort/3
 compare_metadata(#r_content{metadata=MA}, #r_content{metadata=MB}) ->
-    ASize = dict:size(MA),
-    BSize = dict:size(MB),
+    ASize = metadata_size(MA),
+    BSize = metadata_size(MB),
     if ASize < BSize ->
             true;
        ASize > BSize ->
             false;
        true ->
             %% same size metadata, need to do actual compare
-            lists:sort(dict:to_list(MA)) =< lists:sort(dict:to_list(MB))
+            lists:sort(metadata_list(MA)) =< lists:sort(metadata_list(MB))
     end.
 
 %% @private de-duplicates, removes dominated siblings, merges CRDTs
@@ -719,7 +778,7 @@ merge_acc_to_contents(Bucket, MergeAcc) ->
 -spec get_dot(riak_object_dict()) ->
         {ok, {vclock:dot(), vclock:pure_dot()}} | undefined.
 get_dot(Dict) ->
-    case dict:find(?DOT, Dict) of
+    case metadata_find(?DOT, Dict) of
         {ok, Dot} ->
             case vclock:valid_dot(Dot) of
                 true ->
@@ -744,26 +803,34 @@ get_vc_dot(Dict) ->
 %%       update_metadata() calls) to this riak_object.
 -spec apply_updates(riak_object()) -> riak_object().
 apply_updates(Object=#r_object{}) ->
-    VL = case Object#r_object.updatevalue of
-             undefined ->
-                 [C#r_content.value || C <- Object#r_object.contents];
-             _ ->
-                 [Object#r_object.updatevalue]
-         end,
-    MD = case dict:find(clean, Object#r_object.updatemetadata) of
-             {ok,_} ->
-                 MDs = [C#r_content.metadata || C <- Object#r_object.contents],
-                 case Object#r_object.updatevalue of
-                     undefined -> MDs;
-                     _ -> [hd(MDs)]
-                 end;
-             error ->
-                 [dict:erase(clean,Object#r_object.updatemetadata) || _X <- VL]
-         end,
+    VL =
+        case Object#r_object.updatevalue of
+            undefined ->
+                [C#r_content.value || C <- Object#r_object.contents];
+            _ ->
+                [Object#r_object.updatevalue]
+        end,
+    MD =
+        case metadata_find(clean, Object#r_object.updatemetadata) of
+            {ok,_} ->
+                MDs = [C#r_content.metadata || C <- Object#r_object.contents],
+                case Object#r_object.updatevalue of
+                    undefined -> MDs;
+                    _ -> [hd(MDs)]
+                end;
+            error ->
+                [
+                    metadata_remove(
+                        clean,Object#r_object.updatemetadata)
+                    || _X <- VL
+                    ]
+        end,
     Contents = [#r_content{metadata=M,value=V} || {M,V} <- lists:zip(MD, VL)],
-    Object#r_object{contents=Contents,
-                    updatemetadata=dict:store(clean, true, dict:new()),
-                    updatevalue=undefined}.
+    Object#r_object{
+        contents = Contents,
+        updatemetadata = #{clean => true},
+        updatevalue = undefined
+    }.
 
 %% @doc Return the containing bucket for this riak_object.
 -spec bucket(riak_object()|proxy_object()) -> bucket().
@@ -913,7 +980,7 @@ vclock_hash(Obj=#r_object{}) ->
 %% @doc  Set the updated metadata of an object to M.
 -spec update_metadata(riak_object(), riak_object_dict()) -> riak_object().
 update_metadata(Object=#r_object{}, M) ->
-    Object#r_object{updatemetadata=dict:erase(clean, M)}.
+    Object#r_object{updatemetadata = metadata_remove(clean, M)}.
 
 %% @doc  Set the updated value of an object to V
 -spec update_value(riak_object(), value()) -> riak_object().
@@ -984,7 +1051,14 @@ actor_counter(Actor, #r_object{vclock=VC}) ->
 -spec assign_dot(riak_object(), vclock:dot(), boolean()) -> riak_object().
 assign_dot(Object=#r_object{}, Dot, true) ->
     #r_object{contents=[C=#r_content{metadata=Meta0}]} = Object,
-    Object#r_object{contents=[C#r_content{metadata=dict:store(?DOT, Dot, Meta0)}]};
+    Object#r_object{
+        contents=
+        [
+            C#r_content{
+                metadata = metadata_update(?DOT, Dot, Meta0)
+            }
+        ]
+    };
 assign_dot(Object, _Dot, _DVVEnabled) ->
     Object.
 
@@ -1048,9 +1122,12 @@ index_data(undefined) ->
     [];
 index_data(Obj) ->
     MetaDatas = get_metadatas(Obj),
-    lists:flatten([dict:fetch(?MD_INDEX, MD)
-                   || MD <- MetaDatas,
-                      dict:is_key(?MD_INDEX, MD)]).
+    lists:flatten(
+        [
+            metadata_get(?MD_INDEX, MD)
+            || MD <- MetaDatas, metadata_present(?MD_INDEX, MD)
+            ]
+        ).
 
 %% @doc Assemble a list of index specs in the
 %% form of triplets of the form
@@ -1089,7 +1166,7 @@ from_json(JsonObj) ->
     riak_object_json:decode(JsonObj).
 
 is_updated(_Object=#r_object{updatemetadata=M,updatevalue=V}) ->
-    case dict:find(clean, M) of
+    case metadata_find(clean, M) of
         error -> true;
         {ok,_} ->
             case V of
@@ -1457,7 +1534,7 @@ is_aae_object_deleted([], ReturnMD) ->
 is_aae_object_deleted(MDs, ReturnMD) ->
     PredFun = 
         fun(M) ->
-            dict:is_key(<<"X-Riak-Deleted">>, M)
+            metadata_present(<<"X-Riak-Deleted">>, M)
         end,
     IsDeleted = lists:all(PredFun, MDs),
     case ReturnMD of
@@ -1502,7 +1579,7 @@ sib_of_binary(<<ValLen:32/integer, ValBin:ValLen/binary, MetaLen:32/integer, Met
     MDList2 = vtag_meta(VTag, MDList1),
     MDList3 = val_encoding_meta(ValBin, MDList2),
     MDList = meta_of_binary(MetaRestBin, MDList3),
-    MD = dict:from_list(MDList),
+    MD = maps:from_list(MDList),
     {#r_content{metadata=MD, value=decode_maybe_binary(ValBin)}, LastModDate, Rest}.
 
 val_encoding_meta(<<>>, MDList) ->
@@ -1568,9 +1645,12 @@ bin_contents(Contents) ->
     lists:foldl(F, <<>>, Contents).
 
 meta_bin(MD) ->
-    {{VTagVal, Deleted, LastModVal}, RestBin} = dict:fold(fun fold_meta_to_bin/3,
-                                                          {{undefined, <<0>>, undefined}, <<>>},
-                                                          MD),
+    {{VTagVal, Deleted, LastModVal}, RestBin} =
+        metadata_fold(
+            fun fold_meta_to_bin/3,
+            {{undefined, <<0>>, undefined}, <<>>},
+            MD
+        ),
     VTagBin = case VTagVal of
                   undefined ->  ?EMPTY_VTAG_BIN;
                   _ -> list_to_binary(VTagVal)
@@ -1611,9 +1691,9 @@ encode_maybe_binary(Value, 0) when not is_binary(Value) ->
     <<0, (term_to_binary(Value))/binary>>.
 
 determine_binary_type(Val, Meta) when is_binary(Val) ->
-    case dict:find(?MD_VAL_ENCODING, Meta) of
+    case metadata_find(?MD_VAL_ENCODING, Meta) of
         error -> {1, Meta};
-        {ok, TypeTag} -> {TypeTag, dict:erase(?MD_VAL_ENCODING, Meta)}
+        {ok, TypeTag} -> {TypeTag, metadata_remove(?MD_VAL_ENCODING, Meta)}
     end;
 determine_binary_type(_Val, Meta) ->
     {0, Meta}.
@@ -1635,23 +1715,24 @@ update_last_modified(RObj) ->
 %% Update X-Riak-VTag and X-Riak-Last-Modified in the object's metadata, if
 %% necessary with an external timestamp passed in.
 update_last_modified(RObj, TS) ->
-    MD0 = case dict:find(clean, riak_object:get_update_metadata(RObj)) of
-              {ok, true} ->
-                  %% There have been no changes to updatemetadata. If we stash the
-                  %% last modified in this dict, it will cause us to lose existing
-                  %% metadata (bz://508). If there is only one instance of metadata,
-                  %% we can safely update that one, but in the case of multiple siblings,
-                  %% it's hard to know which one to use. In that situation, use the update
-                  %% metadata as is.
-                  case riak_object:get_metadatas(RObj) of
-                      [MD] ->
-                          MD;
-                      _ ->
-                          riak_object:get_update_metadata(RObj)
-                  end;
-               _ ->
-                  riak_object:get_update_metadata(RObj)
-          end,
+    MD0 =
+        case metadata_find(clean, riak_object:get_update_metadata(RObj)) of
+            {ok, true} ->
+                %% There have been no changes to updatemetadata. If we stash the
+                %% last modified in this dict, it will cause us to lose existing
+                %% metadata (bz://508). If there is only one instance of metadata,
+                %% we can safely update that one, but in the case of multiple siblings,
+                %% it's hard to know which one to use. In that situation, use the update
+                %% metadata as is.
+                case riak_object:get_metadatas(RObj) of
+                    [MD] ->
+                        MD;
+                    _ ->
+                        riak_object:get_update_metadata(RObj)
+                end;
+            _ ->
+                riak_object:get_update_metadata(RObj)
+        end,
     %% Post-0.14.2 changed vtags to be generated from node/now rather the vclocks.
     %% The vclock has not been updated at this point.  Vtags/etags should really
     %% be an external interface concern and are only used for sibling selection
@@ -1660,13 +1741,17 @@ update_last_modified(RObj, TS) ->
     %% which should serve the same purpose.  It was possible to generate two
     %% objects with the same vclock on 0.14.2 if the same clientid was used in
     %% the same second.  It can be revisited post-1.0.0.
-    NewMD = dict:store(?MD_VTAG, riak_kv_util:make_vtag(TS),
-                       dict:store(?MD_LASTMOD, TS, MD0)),
+    NewMD =
+        metadata_update(
+            ?MD_VTAG,
+            riak_kv_util:make_vtag(TS),
+            metadata_update(?MD_LASTMOD, TS, MD0)
+        ),
     riak_object:update_metadata(RObj, NewMD).
 
 %% Get the last modified date from the metadata
 get_last_modified(MD) ->
-    case dict:find(?MD_LASTMOD, MD) of
+    case metadata_find(?MD_LASTMOD, MD) of
         error ->
             {0, 0, 0};
         {ok, TS} ->
@@ -2048,7 +2133,7 @@ ancestor() ->
     O3 = riak_object:increment_vclock(O2, Actor),
     [O] = riak_object:ancestors([O,O3]),
     MD = riak_object:get_metadata(O3),
-    ?assertMatch({Actor, {1, _}}, dict:fetch(?DOT, MD)),
+    ?assertMatch({Actor, {1, _}}, metadata_get(?DOT, MD)),
     {O,O3}.
 
 ancestor_weird_clocks() ->
@@ -2135,10 +2220,17 @@ inequality_multivalue_test() ->
 inequality_metadata_test() ->
     O1 = riak_object:new(<<"test">>, <<"a">>, "value"),
     O2 = riak_object:new(<<"test">>, <<"a">>, "value"),
-    O1p = riak_object:apply_updates(
+    O1p = 
+        riak_object:apply_updates(
             riak_object:update_metadata(
-              O1, dict:store(<<"X-Riak-Test">>, "value",
-                             riak_object:get_metadata(O1)))),
+                O1,
+                metadata_update(
+                    <<"X-Riak-Test">>,
+                    "value",
+                    riak_object:get_metadata(O1)
+                )
+            )
+        ),
     false = riak_object:equal(O1p, O2).
 
 inequality_key_test() ->
@@ -2179,22 +2271,32 @@ date_reconcile() ->
     D = calendar:datetime_to_gregorian_seconds(
           httpd_util:convert_request_date(
             httpd_util:rfc1123_date())),
-    O2 = apply_updates(
-           riak_object:update_metadata(
-             increment_vclock(O, date),
-             dict:store(
-               <<"X-Riak-Last-Modified">>,
-               httpd_util:rfc1123_date(
-                 calendar:gregorian_seconds_to_datetime(D)),
-               get_metadata(O)))),
-    O4 = apply_updates(
-           riak_object:update_metadata(
-             O3,
-             dict:store(
-               <<"X-Riak-Last-Modified">>,
-               httpd_util:rfc1123_date(
-                 calendar:gregorian_seconds_to_datetime(D+1)),
-               get_metadata(O3)))),
+    O2 = 
+        apply_updates(
+            riak_object:update_metadata(
+                increment_vclock(O, date),
+                metadata_update(
+                    <<"X-Riak-Last-Modified">>,
+                    httpd_util:rfc1123_date(
+                        calendar:gregorian_seconds_to_datetime(D)
+                    ),
+                    get_metadata(O)
+                )
+            )
+        ),
+    O4 =
+        apply_updates(
+            riak_object:update_metadata(
+                O3,
+                metadata_update(
+                    <<"X-Riak-Last-Modified">>,
+                    httpd_util:rfc1123_date(
+                        calendar:gregorian_seconds_to_datetime(D+1)
+                    ),
+                    get_metadata(O3)
+                )
+            )
+        ),
     O5 = riak_object:reconcile([O2,O4], false),
     false = riak_object:equal(O2, O5),
     false = riak_object:equal(O4, O5).
@@ -2209,7 +2311,7 @@ get_update_value_test() ->
 get_update_metadata_test() ->
     O = riak_object:new(<<"test">>, <<"test">>, val),
     OldMD = riak_object:get_metadata(O),
-    NewMD = dict:store(<<"X-Riak-Test">>, "testval", OldMD),
+    NewMD = metadata_update(<<"X-Riak-Test">>, "testval", OldMD),
     ?assertNot(NewMD =:= OldMD),
     ?assertEqual(NewMD,
                  riak_object:get_update_metadata(
@@ -2218,16 +2320,22 @@ get_update_metadata_test() ->
 is_updated_test() ->
     O = riak_object:new(<<"test">>, <<"test">>, test),
     ?assertNot(is_updated(O)),
-    OMu = riak_object:update_metadata(
-            O, dict:store(<<"X-Test-Update">>, "testupdate",
-                          riak_object:get_metadata(O))),
+    OMu = 
+        riak_object:update_metadata(
+            O, 
+            metadata_update(
+                <<"X-Test-Update">>,
+                "testupdate",
+                riak_object:get_metadata(O)
+            )
+        ),
     ?assert(is_updated(OMu)),
     OVu = riak_object:update_value(O, testupdate),
     ?assert(is_updated(OVu)).
 
 new_with_ctype_test() ->
     O = riak_object:new(<<"b">>, <<"k">>, <<"{\"a\":1}">>, "application/json"),
-    ?assertEqual("application/json", dict:fetch(?MD_CTYPE, riak_object:get_metadata(O))).
+    ?assertEqual("application/json", metadata_get(?MD_CTYPE, riak_object:get_metadata(O))).
 
 new_with_md_test() ->
     O = riak_object:new(<<"b">>, <<"k">>, <<"abc">>, dict:from_list([{?MD_CHARSET,"utf8"}])),
@@ -2373,7 +2481,7 @@ nextgenrepl() ->
 verify_contents([], []) ->
     ?assert(true);
 verify_contents([{MD, V} | Rest], [{{Actor, Count}, V} | Rest2]) ->
-    ?assertMatch({Actor, {Count, _}}, dict:fetch(?DOT, MD)),
+    ?assertMatch({Actor, {Count, _}}, metadata_get(?DOT, MD)),
     verify_contents(Rest, Rest2).
 
 
