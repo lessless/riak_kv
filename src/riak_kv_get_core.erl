@@ -485,9 +485,18 @@ update_test() ->
     B = <<"buckets are binaries">>,
     K = <<"keys are binaries">>,
     V = <<"Some value">>,
-    InObject = riak_object:new(B, K, V,
-                                dict:from_list([{<<"X-Riak-Val-Encoding">>, 2},
-                                {<<"X-Foo_MetaData">>, "Foo"}])),
+    InObject =
+        riak_object:new(
+            B,
+            K,
+            V,
+            maps:from_list(
+                [
+                    {<<"X-Riak-Val-Encoding">>, 2},
+                    {<<"X-Foo_MetaData">>, "Foo"}
+                ]
+            )
+        ),
     Obj3 = riak_object:convert_object_to_headonly(B, K, InObject),
 
     GC0 = #getcore{n= 3, r = 2, pr=0,

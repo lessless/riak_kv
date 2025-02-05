@@ -112,7 +112,7 @@
 -export([find_bestobject/1]).
 -export([spoof_getdeletedobject/1]).
 -export([delete_hash/1]).
--export([metadata_find/2, metadata_get/2, metadata_update/3, metadata_present/2]).
+-export([metadata_find/2, metadata_get/2, metadata_update/3, metadata_present/2, metadata_remove/2]).
 
 -ifdef(TEST).
 -export([convert_object_to_headonly/3]). % Used in unit testing of get_core
