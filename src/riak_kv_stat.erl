@@ -36,7 +36,7 @@
 -endif.
 
 %% API
--export([start_link/0, get_stats/0,
+-export([start_link/0,
          update/1, perform_update/1, register_stats/0, produce_stats/0,
          leveldb_read_block_errors/0, stat_update_error/3, stop/0]).
 -export([track_bucket/1, untrack_bucket/1]).
@@ -61,15 +61,17 @@ start_link() ->
 register_stats() ->
     riak_core_stat:register_stats(?APP, stats()).
 
-%% @spec get_stats() -> proplist()
-%% @doc Get the current aggregation of stats.
-get_stats() ->
-    riak_kv_wm_stats:get_stats().
-
-do_register_stat(Name, Type) ->
-    exometer:new(Name, Type).
+%% Creation of a dynamic stat _must_ be serialized.
+register_stat(Name, Type) ->
+    do_register_stat(Name, Type).
+%% gen_server:call(?SERVER, {register, Name, Type}).
 
 update(Arg) ->
+    maybe_dispatch_to_sidejob(erlang:module_loaded(riak_kv_stat_sj), Arg).
+
+maybe_dispatch_to_sidejob(true, Arg) ->
+    riak_kv_stat_worker:update(Arg);
+maybe_dispatch_to_sidejob(false, Arg) ->
     try perform_update(Arg) catch Class:Error ->
        stat_update_error(Arg, Class, Error)
     end,
@@ -91,21 +93,11 @@ untrack_bucket(Bucket) when is_binary(Bucket) ->
 
 %% The current number of active get fsms in riak
 active_gets() ->
-    case application:get_env(riak_kv, get_fsm_active_counter, none) of
-        none ->
-            counter_value([?PFX, ?APP, node, gets, fsm, active]);
-        CRef ->
-            counters:get(CRef, 1)
-    end.
+    counter_value([?PFX, ?APP, node, gets, fsm, active]).
 
 %% The current number of active put fsms in riak
 active_puts() ->
-    case application:get_env(riak_kv, put_fsm_active_counter, none) of
-        none ->
-            counter_value([?PFX, ?APP, node, puts, fsm, active]);
-        CRef ->
-            counters:get(CRef, 1)
-    end.
+    counter_value([?PFX, ?APP, node, puts, fsm, active]).
 
 counter_value(Name) ->
     case exometer:get_value(Name, [value]) of
@@ -211,37 +203,49 @@ do_update({riak_object_merge, Mod, Micros}) ->
     Type = riak_kv_crdt:from_mod(Mod),
     ok = create_or_update([P, ?APP, object, Type, merge], 1, spiral),
     create_or_update([P, ?APP, object, Type, merge, time], Micros, histogram);
-do_update({get_fsm, _Bucket, Microsecs, _Stages, undefined, undefined, _PerBucket, undefined}) ->
+do_update({get_fsm, Bucket, Microsecs, Stages, undefined, undefined, PerBucket, undefined}) ->
     P = riak_core_stat:prefix(),
     ok = exometer:update([P, ?APP, node, gets], 1),
-    ok = exometer:update([P, ?APP, node, gets, time], Microsecs);
-do_update({get_fsm, _Bucket, Microsecs, _Stages, NumSiblings, ObjSize, _PerBucket, undefined}) ->
+    ok = exometer:update([P, ?APP, node, gets, time], Microsecs),
+    ok = do_stages([P, ?APP, node, gets, time], Stages),
+    do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, undefined, undefined});
+do_update({get_fsm, Bucket, Microsecs, Stages, NumSiblings, ObjSize, PerBucket, undefined}) ->
     P = riak_core_stat:prefix(),
     ok = exometer:update([P, ?APP, node, gets], 1),
     ok = exometer:update([P, ?APP, node, gets, time], Microsecs),
     ok = exometer:update([P, ?APP, node, gets, siblings], NumSiblings),
-    ok = exometer:update([P, ?APP, node, gets, objsize], ObjSize);
-do_update({get_fsm, _Bucket, Microsecs, _Stages, undefined, undefined, _PerBucket, CRDTMod}) ->
+    ok = exometer:update([P, ?APP, node, gets, objsize], ObjSize),
+    ok = do_stages([P, ?APP, node, gets, time], Stages),
+    do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, NumSiblings, ObjSize});
+do_update({get_fsm, Bucket, Microsecs, Stages, undefined, undefined, PerBucket, CRDTMod}) ->
     P = riak_core_stat:prefix(),
     Type = riak_kv_crdt:from_mod(CRDTMod),
     ok = create_or_update([P, ?APP, node, gets, Type], 1, spiral),
-    ok = create_or_update([P, ?APP, node, gets, Type, time], Microsecs, histogram);
-do_update({get_fsm, _Bucket, Microsecs, _Stages, NumSiblings, ObjSize, _PerBucket, CRDTMod}) ->
+    ok = create_or_update([P, ?APP, node, gets, Type, time], Microsecs, histogram),
+    ok = do_stages([P, ?APP, node, gets, Type, time], Stages),
+    do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, undefined, undefined, Type});
+do_update({get_fsm, Bucket, Microsecs, Stages, NumSiblings, ObjSize, PerBucket, CRDTMod}) ->
     P = ?PFX,
     Type = riak_kv_crdt:from_mod(CRDTMod),
     ok = create_or_update([P, ?APP, node, gets, Type], 1, spiral),
     ok = create_or_update([P, ?APP, node, gets, Type, time], Microsecs, histogram),
     ok = create_or_update([P, ?APP, node, gets, Type, siblings], NumSiblings, histogram),
-    ok = create_or_update([P, ?APP, node, gets, Type, objsize], ObjSize, histogram);
-do_update({put_fsm_time, _Bucket,  Microsecs, _Stages, _PerBucket, undefined}) ->
+    ok = create_or_update([P, ?APP, node, gets, Type, objsize], ObjSize, histogram),
+    ok = do_stages([P, ?APP, node, gets, Type, time], Stages),
+    do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type});
+do_update({put_fsm_time, Bucket,  Microsecs, Stages, PerBucket, undefined}) ->
     P = ?PFX,
     ok = exometer:update([P, ?APP, node, puts], 1),
-    ok = exometer:update([P, ?APP, node, puts, time], Microsecs);
-do_update({put_fsm_time, _Bucket,  Microsecs, _Stages, _PerBucket, CRDTMod}) ->
+    ok = exometer:update([P, ?APP, node, puts, time], Microsecs),
+    ok = do_stages([P, ?APP, node, puts, time], Stages),
+    do_put_bucket(PerBucket, {Bucket, Microsecs, Stages});
+do_update({put_fsm_time, Bucket,  Microsecs, Stages, PerBucket, CRDTMod}) ->
     P = ?PFX,
     Type = riak_kv_crdt:from_mod(CRDTMod),
     ok = create_or_update([P, ?APP, node, puts, Type], 1, spiral),
-    ok = create_or_update([P, ?APP, node, puts, Type, time], Microsecs, histogram);
+    ok = create_or_update([P, ?APP, node, puts, Type, time], Microsecs, histogram),
+    ok = do_stages([P, ?APP, node, puts, Type, time], Stages),
+    do_put_bucket(PerBucket, {Bucket, Microsecs, Stages, Type});
 do_update({index_fsm_time, Microsecs, ResultCount}) ->
     P = ?PFX,
     ok = exometer:update([P, ?APP, index, fsm, complete], 1),
@@ -422,6 +426,80 @@ monitor_loop(Type) ->
     end,
     monitor_loop(Type).
 
+%%  per bucket get_fsm stats
+do_get_bucket(false, _) ->
+    ok;
+do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize}=Args) ->
+    P = riak_core_stat:prefix(),
+    case exometer:update([P, ?APP, node, gets, Bucket], 1) of
+        ok ->
+            [exometer:update([P, ?APP, node, gets, Dimension, Bucket], Arg)
+             || {Dimension, Arg} <- [{time, Microsecs},
+                                     {siblings, NumSiblings},
+                                     {objsize, ObjSize}], Arg /= undefined],
+            do_stages([P, ?APP, node, gets, time, Bucket], Stages);
+        {error, not_found} ->
+            exometer:new([P, ?APP, node, gets, Bucket], spiral),
+            [register_stat([P, ?APP, node, gets, Dimension, Bucket], histogram) || Dimension <- [time,
+                                                                                                 siblings,
+                                                                                                 objsize]],
+            do_get_bucket(true, Args)
+    end;
+do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type}=Args) ->
+    P = riak_core_stat:prefix(),
+    case exometer:update([P, ?APP, node, gets, Type, Bucket], 1) of
+	ok ->
+	    [exometer:update([P, ?APP, node, gets, Dimension, Bucket], Arg)
+	     || {Dimension, Arg} <- [{time, Microsecs},
+				     {siblings, NumSiblings},
+				     {objsize, ObjSize}], Arg /= undefined],
+	    do_stages([P, ?APP, node, gets, Type, time, Bucket], Stages);
+	{error, not_found} ->
+	    exometer:new([P, ?APP, node, gets, Type, Bucket], spiral),
+	    [register_stat([P, ?APP, node, gets, Type, Dimension, Bucket], histogram)
+	     || Dimension <- [time, siblings, objsize]],
+	    do_get_bucket(true, Args)
+    end.
+
+%% per bucket put_fsm stats
+do_put_bucket(false, _) ->
+    ok;
+do_put_bucket(true, {Bucket, Microsecs, Stages}=Args) ->
+    P = riak_core_stat:prefix(),
+    case exometer:update([P, ?APP, node, puts, Bucket], 1) of
+        ok ->
+            exometer:update([P, ?APP, node, puts, time, Bucket], Microsecs),
+            do_stages([P, ?APP, node, puts, time, Bucket], Stages);
+        {error, _} ->
+            register_stat([P, ?APP, node, puts, Bucket], spiral),
+            register_stat([P, ?APP, node, puts, time, Bucket], histogram),
+            do_put_bucket(true, Args)
+    end;
+do_put_bucket(true, {Bucket, Microsecs, Stages, Type}=Args) ->
+    P = riak_core_stat:prefix(),
+    case exometer:update([P, ?APP, node, puts, Type, Bucket], 1) of
+	ok ->
+	    exometer:update([P, ?APP, node, puts, Type, time, Bucket], Microsecs),
+	    do_stages([P, ?APP, node, puts, Type, time, Bucket], Stages);
+	{error, not_found} ->
+	    register_stat([P, ?APP, node, puts, Type, Bucket], spiral),
+	    register_stat([P, ?APP, node, puts, Type, time, Bucket], histogram),
+	    do_put_bucket(true, Args)
+    end.
+
+
+%% Path is list that provides a conceptual path to a stat
+%% folsom uses the tuple as flat name
+%% but some ets query magic means we can get stats by APP, Stat, DimensionX
+%% Path, then is a list like [?APP, StatName]
+%% Both get and put fsm have a list of {state, microseconds}
+%% that they provide for stats.
+%% Use the state to append to the stat "path" to create a further dimension on the stat
+do_stages(_Path, []) ->
+    ok;
+do_stages(Path, [{Stage, Time}|Stages]) ->
+    create_or_update(Path ++ [Stage], Time, histogram),
+    do_stages(Path, Stages).
 
 %% create dimensioned stats for read repairs.
 %% The preflist has been filtered to remove those that will not be subject to
@@ -909,6 +987,9 @@ bc_stats(Pfx) ->
 %% Wrapper for exometer function stats.
 value(V) ->
     V.
+
+do_register_stat(Name, Type) ->
+    exometer:new(Name, Type).
 
 %% @doc produce the legacy blob of stats for display.
 produce_stats() ->
