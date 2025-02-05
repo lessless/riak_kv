@@ -555,14 +555,14 @@
 %% @doc Direct stat changes
 %% Bypass sidejob for stat updates - increases efficiency, but prevents rate
 %% limiting of stat updates
-{mapping, "direct_stat", "riak_kv.direct_stat", [
+{mapping, "direct_stat", "riak_kv.direct_stats", [
     {default, on},
     {datatype, flag},
     hidden
 ]}.
 
 %% @doc Direct stat changes
-%% Bypass sidejob for GET and PUT FSMs in creases efficiency but prevents rate
+%% Bypass sidejob for GET and PUT FSMs increases efficiency but prevents rate
 %% limiting
 {mapping, "direct_fsm", "riak_kv.direct_fsm", [
     {default, on},
