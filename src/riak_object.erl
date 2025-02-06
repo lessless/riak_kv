@@ -78,7 +78,7 @@
 -type index_spec() :: {index_op(), binary(), index_value()}.
 -type binary_version() :: v0 | v1.
 
--export_type([index_spec/0]).
+-export_type([index_spec/0, riak_object_dict/0]).
 
 -define(MAX_KEY_SIZE, 65536).
 

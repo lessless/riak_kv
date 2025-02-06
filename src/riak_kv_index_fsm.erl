@@ -56,11 +56,6 @@
 -type from() :: {atom(), req_id(), pid()}.
 -type req_id() :: non_neg_integer().
 
--ifdef(namespaced_types).
--type riak_kv_index_fsm_dict() :: dict:dict().
--else.
--type riak_kv_index_fsm_dict() :: dict().
--endif.
 
 -record(timings, 
             {start_time = os:timestamp() :: erlang:timestamp(),
@@ -79,7 +74,7 @@
                 pagination_sort :: boolean(),
                 merge_sort_buffer = undefined :: sms:sms() | undefined,
                 max_results :: all | pos_integer(),
-                results_per_vnode = dict:new() :: riak_kv_index_fsm_dict(),
+                results_per_vnode = maps:new() :: map(),
                 timings = #timings{} :: timings(),
                 bucket :: riak_object:bucket() | undefined,
                 results_sent = 0 :: non_neg_integer()}).
@@ -147,7 +142,7 @@ process_results(VNode, {From, Bucket, Results}, State) ->
     case process_results(VNode, {Bucket, Results}, State) of
         {ok, State2 = #state{pagination_sort=true}} ->
             #state{results_per_vnode=PerNode, max_results=MaxResults} = State2,
-            case {dict:fetch(VNode, PerNode), MaxResults} of
+            case {maps:get(VNode, PerNode), MaxResults} of
                 {VnodeCount, MR} when is_integer(MR), VnodeCount >= MR ->
                     riak_kv_vnode:stop_fold(From),
                     {done, State2};
@@ -168,7 +163,10 @@ process_results(VNode, {_Bucket, Results}, State = #state{pagination_sort=true})
     %% add new results to buffer
     {ToSend, NewBuff} = update_buffer(VNode, Results, MergeSortBuffer),
     NumResults = length(Results),
-    NewPerNode = dict:update(VNode, fun(C) -> C + NumResults end, NumResults, PerNode),
+    NewPerNode =
+        maps:update_with(
+            VNode, fun(C) -> C + NumResults end, NumResults, PerNode
+        ),
     LenToSend = length(ToSend),
     {Response, ResultsLen, ResultsToSend} = get_results_to_send(LenToSend, ToSend, ResultsSent, MaxResults),
     send_results(ClientPid, ReqId, ResultsToSend),

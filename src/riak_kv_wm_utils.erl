@@ -50,11 +50,8 @@
 -include_lib("webmachine/include/webmachine.hrl").
 -include("riak_kv_wm_raw.hrl").
 
--ifdef(namespaced_types).
--type riak_kv_wm_utils_dict() :: dict:dict().
--else.
--type riak_kv_wm_utils_dict() :: dict().
--endif.
+
+-type riak_kv_wm_utils_dict() :: riak_object:riak_object_dict().
 
 -type jsonpropvalue() :: integer()|string()|boolean()|{struct,[jsonmodfun()]}.
 -type jsonmodfun() :: {ModBinary :: term(), binary()}|{FunBinary :: term(), binary()}.
@@ -112,56 +109,58 @@ default_encodings() ->
 %% @doc Produce one part of a multipart body, representing one sibling
 %%      of a multi-valued document.
 multipart_encode_body(Prefix, Bucket, {MD, V}, APIVersion) ->
-    Links1 = case dict:find(?MD_LINKS, MD) of
-                 {ok, Ls} -> Ls;
-                 error -> []
-             end,
+    Links1 =
+        case riak_object:metadata_find(?MD_LINKS, MD) of
+            {ok, Ls} -> Ls;
+            error -> []
+        end,
     Links2 = format_links([{Bucket, "up"}|Links1], Prefix, APIVersion),
     Links3 = mochiweb_headers:make(Links2),
     [{?HEAD_LINK, Links4}] = mochiweb_headers:to_list(Links3),
 
     [?HEAD_CTYPE, ": ",get_ctype(MD,V),
-     case dict:find(?MD_CHARSET, MD) of
-         {ok, CS} -> ["; charset=",CS];
-         error -> []
-     end,
-     "\r\n",
-     case dict:find(?MD_ENCODING, MD) of
-         {ok, Enc} -> [?HEAD_ENCODING,": ",Enc,"\r\n"];
-         error -> []
-     end,
-     ?HEAD_LINK,": ",Links4,"\r\n",
-     "Etag: ",dict:fetch(?MD_VTAG, MD),"\r\n",
-     "Last-Modified: ",
-     case dict:fetch(?MD_LASTMOD, MD) of
-         Now={_,_,_} ->
-             httpd_util:rfc1123_date(
-               calendar:now_to_local_time(Now));
-         Rfc1123 when is_list(Rfc1123) ->
-             Rfc1123
-     end,
-     "\r\n",
-     case dict:find(?MD_DELETED, MD) of
-         {ok, "true"} ->
-             [?HEAD_DELETED, ": true\r\n"];
-         error ->
-             []
-     end,
-     case dict:find(?MD_USERMETA, MD) of
-         {ok, M} ->
-            lists:foldl(fun({Hdr,Val},Acc) ->
-                            [Acc|[Hdr,": ",Val,"\r\n"]]
-                        end,
-                        [], M);
-         error -> []
-     end,
-     case dict:find(?MD_INDEX, MD) of
-         {ok, IF} ->
-             [[?HEAD_INDEX_PREFIX,Key,": ",any_to_list(Val),"\r\n"] || {Key,Val} <- IF];
-         error -> []
-     end,
-     "\r\n",
-     encode_value(V)].
+        case riak_object:metadata_find(?MD_CHARSET, MD) of
+            {ok, CS} -> ["; charset=",CS];
+            error -> []
+        end,
+        "\r\n",
+        case riak_object:metadata_find(?MD_ENCODING, MD) of
+            {ok, Enc} -> [?HEAD_ENCODING,": ",Enc,"\r\n"];
+            error -> []
+        end,
+        ?HEAD_LINK,": ",Links4,"\r\n",
+        "Etag: ", riak_object:metadata_get(?MD_VTAG, MD),"\r\n",
+        "Last-Modified: ",
+        case riak_object:metadata_get(?MD_LASTMOD, MD) of
+            Now={_,_,_} ->
+                httpd_util:rfc1123_date(
+                calendar:now_to_local_time(Now));
+            Rfc1123 when is_list(Rfc1123) ->
+                Rfc1123
+        end,
+        "\r\n",
+        case riak_object:metadata_find(?MD_DELETED, MD) of
+            {ok, "true"} ->
+                [?HEAD_DELETED, ": true\r\n"];
+            error ->
+                []
+        end,
+        case riak_object:metadata_find(?MD_USERMETA, MD) of
+            {ok, M} ->
+                lists:foldl(fun({Hdr,Val},Acc) ->
+                                [Acc|[Hdr,": ",Val,"\r\n"]]
+                            end,
+                            [], M);
+            error -> []
+        end,
+        case riak_object:metadata_find(?MD_INDEX, MD) of
+            {ok, IF} ->
+                [[?HEAD_INDEX_PREFIX,Key,": ",any_to_list(Val),"\r\n"] || {Key,Val} <- IF];
+            error -> []
+        end,
+        "\r\n",
+        encode_value(V)
+    ].
 
 format_links(Links, Prefix, APIVersion) ->
     format_links(Links, Prefix, APIVersion, []).
