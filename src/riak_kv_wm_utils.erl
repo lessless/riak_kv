@@ -210,7 +210,7 @@ format_uri(Type, Bucket, Key, _Prefix, 3) ->
 -spec get_ctype(riak_kv_wm_utils_dict(), term()) -> string().
 %% @doc Work out the content type for this object - use the metadata if provided
 get_ctype(MD,V) ->
-    case dict:find(?MD_CTYPE, MD) of
+    case riak_object:metadata_find(?MD_CTYPE, MD) of
         {ok, Ctype} ->
             Ctype;
         error when is_binary(V) ->
