@@ -199,12 +199,14 @@ start(Partition, Config) ->
 -spec return_self(state()) -> pid().
 %% @doc
 %% Return the Bookie PID from the ModState
-return_self(State) -> State#state.bookie.
+return_self(#state{bookie=Bookie}) when is_pid(Bookie) -> Bookie.
 
 %% @doc Stop the leveled backend
 -spec stop(state()) -> ok.
-stop(#state{bookie=Bookie}) ->
-    ok = leveled_bookie:book_close(Bookie).
+stop(#state{bookie=Bookie}) when is_pid(Bookie) ->
+    leveled_bookie:book_close(Bookie);
+stop(_State) ->
+    ok.
 
 
 %% @doc Retrieve an object from the leveled backend as a binary
@@ -213,7 +215,8 @@ stop(#state{bookie=Bookie}) ->
                  {ok, not_found, state()} |
                  {error, term(), state()}.
 get(Bucket, Key, #state{bookie=Bookie}=State) ->
-    case leveled_bookie:book_get(Bookie, Bucket, Key, ?RIAK_TAG) of
+    case leveled_bookie:book_get(
+        check_active(Bookie), Bucket, Key, ?RIAK_TAG) of
         {ok, Value} ->
             {ok, Value, State};
         not_found  ->
@@ -226,7 +229,8 @@ get(Bucket, Key, #state{bookie=Bookie}=State) ->
                  {ok, not_found, state()} |
                  {error, term(), state()}.
 head(Bucket, Key, #state{bookie=Bookie}=State) ->
-    case leveled_bookie:book_head(Bookie, Bucket, Key, ?RIAK_TAG) of
+    case leveled_bookie:book_head(
+        check_active(Bookie), Bucket, Key, ?RIAK_TAG) of
         {ok, Value} ->
             {ok, Value, State};
         not_found  ->
@@ -264,9 +268,8 @@ put(Bucket, Key, IndexSpecs, Val, State) ->
                     {ok, state()} |
                     {error, term(), state()}.
 delete(Bucket, Key, IndexSpecs, #state{bookie=Bookie}=State) ->
-    case leveled_bookie:book_put(Bookie,
-                                    Bucket, Key, delete, IndexSpecs,
-                                    ?RIAK_TAG) of
+    case leveled_bookie:book_put(
+        check_active(Bookie), Bucket, Key, delete, IndexSpecs, ?RIAK_TAG) of
         ok ->
             {ok, State};
         pause ->
@@ -284,10 +287,8 @@ delete(Bucket, Key, IndexSpecs, #state{bookie=Bookie}=State) ->
                    state()) -> {ok, any()} | {async, fun(() -> any())}.
 fold_buckets(FoldBucketsFun, Acc, Opts, #state{bookie=Bookie}) ->
     {async, Folder} = 
-        leveled_bookie:book_bucketlist(Bookie, 
-                                        ?RIAK_TAG, 
-                                        {FoldBucketsFun, Acc}, 
-                                        all),
+        leveled_bookie:book_bucketlist(
+            check_active(Bookie), ?RIAK_TAG, {FoldBucketsFun, Acc}, all),
     case lists:member(async_fold, Opts) of
         true ->
             {async, Folder};
@@ -343,7 +344,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{bookie=Bookie}) ->
                 case Field of
                     <<"$bucket">> ->
                         leveled_bookie:book_keylist(
-                            Bookie,
+                            check_active(Bookie),
                             ?RIAK_TAG,
                             QBucket,
                             {StartKey, null},
@@ -357,7 +358,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{bookie=Bookie}) ->
                             dollarkey_foldfun(
                                 FoldKeysFun, ReadTombs, TermRegex),
                         leveled_bookie:book_headfold(
-                            Bookie,
+                            check_active(Bookie),
                             ?RIAK_TAG,
                             {range, QBucket, {StartKey, EndTerm}},
                             {FoldHeadsFun, Acc},
@@ -367,7 +368,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{bookie=Bookie}) ->
                         );
                     _ ->
                         leveled_bookie:book_indexfold(
-                            Bookie,
+                            check_active(Bookie),
                             {QBucket, StartKey},
                             {FoldKeysFun, Acc},
                             {Field, StartTerm, EndTerm},
@@ -377,11 +378,11 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{bookie=Bookie}) ->
                 % Equivalent to $bucket query, but without the StartKey
                 {bucket, B} = Bucket,
                 leveled_bookie:book_keylist(
-                    Bookie, ?RIAK_TAG, B, {FoldKeysFun, Acc});
+                    check_active(Bookie), ?RIAK_TAG, B, {FoldKeysFun, Acc});
             true ->
                 % All key query - don't constrain by bucket
                 leveled_bookie:book_keylist(
-                    Bookie, ?RIAK_TAG, {FoldKeysFun, Acc})
+                    check_active(Bookie), ?RIAK_TAG, {FoldKeysFun, Acc})
         end,
 
     case {lists:member(async_fold, Opts), SnapPreFold} of
@@ -467,30 +468,36 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{bookie=Bookie}) ->
                 % and EndInclusive should be handled by the passed in fold
                 % function (by the riak_index range checker), so null is used
                 % for EndKey
-                leveled_bookie:book_objectfold(Bookie, 
-                                                ?RIAK_TAG,
-                                                FilterBucket, 
-                                                {StartKey, EndKey},
-                                                {SpecialFoldFun, Acc}, 
-                                                false);
+                leveled_bookie:book_objectfold(
+                    check_active(Bookie), 
+                    ?RIAK_TAG,
+                    FilterBucket, 
+                    {StartKey, EndKey},
+                    {SpecialFoldFun, Acc}, 
+                    false
+                );
             {false, false} ->
                 % It is expected (but not proven) that sqn_order should be
                 % more efficient than key_order when folding over all objects
-                leveled_bookie:book_objectfold(Bookie, 
-                                                ?RIAK_TAG, 
-                                                {FoldObjectsFun, Acc},
-                                                false, 
-                                                sqn_order);
+                leveled_bookie:book_objectfold(
+                    check_active(Bookie), 
+                    ?RIAK_TAG, 
+                    {FoldObjectsFun, Acc},
+                    false, 
+                    sqn_order
+                );
             
             {{bucket, B}, false} ->
                 % The order of this will be key_order and not sqn_order as
                 % defined for fold_objects/4 when not constrained by bucket
-                leveled_bookie:book_objectfold(Bookie, 
-                                                ?RIAK_TAG,
-                                                B, 
-                                                all, 
-                                                {FoldObjectsFun, Acc}, 
-                                                false)
+                leveled_bookie:book_objectfold(
+                    check_active(Bookie), 
+                    ?RIAK_TAG,
+                    B, 
+                    all, 
+                    {FoldObjectsFun, Acc}, 
+                    false
+                )
         end,
     case lists:member(async_fold, Opts) of
         true ->
@@ -537,31 +544,37 @@ fold_heads(FoldHeadsFun, Acc, Opts, #state{bookie=Bookie}) ->
                 KeyRange = 
                     {IdxQuery#riak_kv_index_v3.start_term,
                         IdxQuery#riak_kv_index_v3.end_term},
-                leveled_bookie:book_headfold(Bookie, 
-                                                ?RIAK_TAG, 
-                                                {range, Bucket, KeyRange},
-                                                {FoldHeadsFun, Acc}, 
-                                                CheckPresence, 
-                                                SnapPreFold, 
-                                                SegmentList);
+                leveled_bookie:book_headfold(
+                    check_active(Bookie), 
+                    ?RIAK_TAG, 
+                    {range, Bucket, KeyRange},
+                    {FoldHeadsFun, Acc}, 
+                    CheckPresence, 
+                    SnapPreFold, 
+                    SegmentList
+                );
             false ->
                 case proplists:get_value(bucket, Opts) of
                     undefined ->
-                        leveled_bookie:book_headfold(Bookie, 
-                                                        ?RIAK_TAG, 
-                                                        {FoldHeadsFun, Acc}, 
-                                                        CheckPresence,
-                                                        SnapPreFold,
-                                                        SegmentList);
+                        leveled_bookie:book_headfold(
+                            check_active(Bookie), 
+                            ?RIAK_TAG, 
+                            {FoldHeadsFun, Acc}, 
+                            CheckPresence,
+                            SnapPreFold,
+                            SegmentList
+                        );
                     B ->
                         % Equivalent to a $key query, but without the key range
-                        leveled_bookie:book_headfold(Bookie, 
-                                                        ?RIAK_TAG, 
-                                                        {range, B, all},
-                                                        {FoldHeadsFun, Acc}, 
-                                                        CheckPresence, 
-                                                        SnapPreFold, 
-                                                        SegmentList)
+                        leveled_bookie:book_headfold(
+                            check_active(Bookie), 
+                            ?RIAK_TAG, 
+                            {range, B, all},
+                            {FoldHeadsFun, Acc}, 
+                            CheckPresence, 
+                            SnapPreFold, 
+                            SegmentList
+                        )
                 end
         end,
 
@@ -585,7 +598,7 @@ drop(#state{bookie=Bookie}=State) ->
 %% non-tombstone values; otherwise returns false.
 -spec is_empty(state()) -> boolean().
 is_empty(#state{bookie=Bookie}) ->
-    leveled_bookie:book_isempty(Bookie, ?RIAK_TAG).
+    leveled_bookie:book_isempty(check_active(Bookie), ?RIAK_TAG).
 
 %% @doc Prompt a snapshot function from which a hot backup can be called
 -spec hot_backup(state(), string()) -> {queue, fun(() -> any())}|{error, term()}.
@@ -595,7 +608,8 @@ hot_backup(#state{bookie=Bookie, partition=Partition, db_path=DBP}, BackupRoot) 
             ?LOG_WARNING("Attempt to backup to own path ~s", [BackupRoot]),
             {error, invalid_path};
         {ok, BackupDir} ->
-            {async, BackupFolder} = leveled_bookie:book_hotbackup(Bookie),
+            {async, BackupFolder} =
+                leveled_bookie:book_hotbackup(check_active(Bookie)),
             {queue, fun() -> BackupFolder(BackupDir) end};
         {error, Reason} ->
             %% e.g. of get_data_dir cannot create due to lack of write
@@ -633,7 +647,7 @@ data_size(#state{bookie=Bookie}) ->
         fun() ->
             {async, DataSizeGuesser} =
                 leveled_bookie:book_headfold(
-                    Bookie,
+                    check_active(Bookie),
                     ?RIAK_TAG,
                     {fun(_B, _K, _V, AccC) ->  AccC + TreePortion end, 0},
                     false,
@@ -668,6 +682,13 @@ callback(Ref, UnexpectedCallback, State) ->
 %% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+-spec check_active(pid()|dropped) -> pid().
+check_active(Bookie) when is_pid(Bookie) ->
+    Bookie;
+check_active(InvalidBookie) ->
+    throw({{error, {invalid_ref, InvalidBookie}}}).
+
 -type regex() :: {re_pattern, term(), term(), term(), term()}|undefined.
 
 -spec dollarkey_foldfun(
@@ -742,10 +763,9 @@ log_fragmentation(Allocator) ->
                          {ok, state()} |
                          {error, term(), state()}.
 do_put(Bucket, Key, IndexSpecs, Val, Sync, #state{bookie=Bookie}=State) ->
-    case leveled_bookie:book_put(Bookie,
-                                    Bucket, Key, Val, IndexSpecs,
-                                    ?RIAK_TAG,
-                                    infinity, Sync) of
+    case leveled_bookie:book_put(
+        check_active(Bookie),
+        Bucket, Key, Val, IndexSpecs, ?RIAK_TAG, infinity, Sync) of
         ok ->
             {ok, State};
         pause ->
