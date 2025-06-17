@@ -1,8 +1,7 @@
 %% -------------------------------------------------------------------
 %%
-%% riak_kv_wm_ping: simple Webmachine resource for availability test
+%% riak_kv_wm_system: simple Webmachine resource returning uptime and riak and otp versions
 %%
-%% Copyright (c) 2007-2013 Basho Technologies, Inc.  All Rights Reserved.
 %% Copyright (c) 2025 TI Tokyo.  All Rights Reserved.
 %%
 %% This file is provided to you under the Apache License,
@@ -21,18 +20,17 @@
 %%
 %% -------------------------------------------------------------------
 
-%% @doc simple Webmachine resource for availability test
-
--module(riak_kv_wm_ping).
+-module(riak_kv_wm_system).
 
 %% webmachine resource exports
 -export([
          init/1,
          service_available/2,
          allowed_methods/2,
+         content_types_provided/2,
          is_authorized/2,
          options/2,
-         to_html/2
+         to_json/2
         ]).
 
 -include_lib("webmachine/include/webmachine.hrl").
@@ -68,5 +66,33 @@ is_authorized(ReqData, Ctx) ->
                     "instead.">>, ReqData), Ctx}
     end.
 
-to_html(ReqData, Ctx) ->
-    {"OK", ReqData, Ctx}.
+content_types_provided(RD, Ctx) ->
+    {[{"application/json", to_json}], RD, Ctx}.
+
+-spec to_json(#wm_reqdata{}, undefined) -> {binary(), #wm_reqdata{}, undefined}.
+to_json(RD, Ctx) ->
+    {mochijson2:encode(gather_info()), RD, Ctx}.
+
+gather_info() ->
+    {MS, _} = erlang:statistics(wall_clock),
+    St = MS div 1000,
+    S = St rem 60,
+    Mt = St div 60,
+    M = Mt rem 60,
+    Ht = Mt div 60,
+    H = Ht rem 24,
+    Dt = Ht div 24,
+    D = Dt,
+    Str = case {D, H, M} of
+              {A, _, _} when A > 0 -> io_lib:format("~b day~s, ~b hour~s, ~b minute~s, ~b sec", [D, s(D), H, s(H), M, s(M), S]);
+              {_, A, _} when A > 0 -> io_lib:format("~b hour~s, ~b minute~s, ~b sec", [H, s(H), M, s(M), S]);
+              {_, _, A} when A > 0 -> io_lib:format("~b minute~s, ~b sec", [M, s(M), S]);
+              _ -> io_lib:format("~b sec", [S])
+          end,
+    #{riak_version => list_to_binary("3.4.7"),
+      system_version => list_to_binary(lists:droplast(erlang:system_info(system_version))),
+      uptime => iolist_to_binary(Str)
+     }.
+
+s(1) -> "";
+s(_) -> "s".
