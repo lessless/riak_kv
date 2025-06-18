@@ -58,9 +58,6 @@ is_authorized(ReqData, Ctx) ->
         {true, _SecContext} ->
             {true, ReqData, Ctx};
         insecure ->
-            %% XXX 301 may be more appropriate here, but since the http and
-            %% https port are different and configurable, it is hard to figure
-            %% out the redirect URL to serve.
             {{halt, 426}, wrq:append_to_resp_body(<<"Security is enabled and "
                     "Riak does not accept credentials over HTTP. Try HTTPS "
                     "instead.">>, ReqData), Ctx}
@@ -89,10 +86,13 @@ gather_info() ->
               {_, _, A} when A > 0 -> io_lib:format("~b minute~s, ~b sec", [M, s(M), S]);
               _ -> io_lib:format("~b sec", [S])
           end,
-    #{riak_version => list_to_binary("3.4.7"),
+    #{riak_version => list_to_binary(riak_version()),
       system_version => list_to_binary(lists:droplast(erlang:system_info(system_version))),
       uptime => iolist_to_binary(Str)
      }.
 
 s(1) -> "";
 s(_) -> "s".
+
+riak_version() ->
+    element(2, lists:keyfind("riak", 1, release_handler:which_releases())).
