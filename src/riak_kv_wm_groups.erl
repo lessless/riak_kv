@@ -1,6 +1,6 @@
 %% -------------------------------------------------------------------
 %%
-%% riak_kv_wm_users: Webmachine resource exposing security users
+%% riak_kv_wm_groups: Webmachine resource exposing security groups
 %%
 %% Copyright (c) 2025 TI Tokyo.  All Rights Reserved.
 %%
@@ -20,7 +20,7 @@
 %%
 %% -------------------------------------------------------------------
 
--module(riak_kv_wm_users).
+-module(riak_kv_wm_groups).
 
 %% webmachine resource exports
 -export([
@@ -79,7 +79,7 @@ to_json(RD, Ctx) ->
                        Acc;
                   ({Username, Options}, Acc) ->
                        [{Username, Options}|Acc]
-               end, [], {<<"security">>, <<"users">>}),
+               end, [], {<<"security">>, <<"groups">>}),
     Users =
         [ begin
               PasswordOptions = proplists:get_value("password", Options, []),
@@ -102,14 +102,14 @@ to_json(RD, Ctx) ->
     {true, #wm_reqdata{}, #context{}}.
 %% @doc Delete the document specified.
 delete_resource(RD, Ctx) ->
-    case wrq:path_info(user, RD) of
+    case wrq:path_info(group, RD) of
         undefined ->
             {{halt, 409}, RD, Ctx};
         Defined ->
             User = riak_kv_wm_utils:maybe_decode_uri(RD, Defined),
-            case riak_core_security:del_user(User) of
+            case riak_core_security:del_group(User) of
                 ok -> {true, RD, Ctx};
-                {error, {unknown_user, _}} -> {{halt, 404}, RD, Ctx}
+                {error, {unknown_group, _}} -> {{halt, 404}, RD, Ctx}
             end
     end.
 

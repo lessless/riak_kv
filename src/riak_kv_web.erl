@@ -46,7 +46,10 @@ dispatch_table() ->
         riak_kv_wm_stats, StatsProps},
        {["ping"], riak_kv_wm_ping, []},
        {["system_info"], riak_kv_wm_system, []},
-       {["users"], riak_kv_wm_users, []}
+       {["users"], riak_kv_wm_users, []},
+       {["users", user], riak_kv_wm_users, []},
+       {["groups"], riak_kv_wm_groups, []},
+       {["groups", group], riak_kv_wm_groups, []}
       ]).
 
 raw_dispatch() ->
