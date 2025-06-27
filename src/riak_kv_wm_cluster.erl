@@ -68,26 +68,83 @@ content_types_provided(RD, Ctx) ->
 
 -spec to_json(#wm_reqdata{}, undefined) -> {binary(), #wm_reqdata{}, undefined}.
 to_json(RD, Context) ->
-    {ok, RawNodes} = get_nodes(),
+    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+    Claimant = riak_core_ring:claimant(Ring),
+    Nodes = get_nodes(),
 
-    Nodes = [jsonify_node(Node) || Node <- RawNodes],
-    Encoded = mochijson2:encode({struct, [{nodes, Nodes}]}),
+    Current = [jsonify_node(Node, Claimant) || Node <- Nodes],
 
-    {Encoded, ReqData, Context}.
+    Planned =
+        case get_plan() of
+            {error, Error} ->
+                Error;
+            {ok, [], _Claim} ->
+                [];
+            {ok, Changes, Claim} ->
+                merge_transitions(Nodes, Changes, Claim, Claimant)
+        end,
 
--record(member_info, {node        :: atom(),
-                      status      :: undefined | status(),
-                      reachable   :: boolean(),
-                      vnodes      :: vnodes(),
-                      handoffs    :: handoffs(),
-                      ring_pct    :: undefined | float(),
-                      pending_pct :: undefined | float(),
-                      mem_total   :: undefined | integer(),
-                      mem_used    :: undefined | integer(),
-                      mem_erlang  :: undefined | integer(),
-                      action      :: undefined | action(),
-                      replacement :: node()
-                     }).
+    Clusters = [{current, Current}, {staged, Planned}],
+
+    {mochijson2:encode(Clusters), RD, Context}.
+
+merge_transitions(Nodes, Changes, Claim, Claimant) ->
+    [jsonify_node(apply_changes(Node, Changes, Claim), Claimant)
+     || Node <- Nodes].
+
+apply_changes(Node, Changes, Claim) ->
+    apply_status_change(apply_claim_change(Node, Claim), Changes).
+
+apply_status_change(Node, Changes) ->
+    Name = proplists:get_value(node, Node),
+    case proplists:get_value(Name, Changes) of
+        false ->
+            Node;
+        {_, {Action, Replacement}} ->
+            Node ++ [{action, Action}, {replacement, Replacement}];
+        {_, Action} ->
+            Node ++ [{action, Action}]
+    end.
+
+apply_claim_change(Node, Claim) ->
+    Name = proplists:get_value(node, Node),
+    case lists:keyfind(Name, 1, Claim) of
+        false ->
+            N1 = lists:keyreplace(ring_pct, 1, Node, {ring_pct, 0.0}),
+            lists:keyreplace(pending_pct, 1, N1, {pending_pct, 0.0});
+        {_, {_, Future}} ->
+            %% @doc Hack until core returns normalized values.
+            Normalized = if
+                Future > 0 ->
+                    Future / 100;
+                true ->
+                    Future
+            end,
+            N1 = lists:keyreplace(ring_pct, 1, Node, {ring_pct, Normalized}),
+            lists:keyreplace(pending_pct, 1, N1, {pending_pct, Normalized})
+    end.
+
+jsonify_node(Node, Claimant) ->
+    LWM = 0.1,
+    MemUsed = proplists:get_value(mem_used, Node),
+    MemTotal = proplists:get_value(mem_total, Node),
+    Reachable = proplists:get_value(reachable, Node),
+    LowMem = low_mem(Reachable, MemUsed, MemTotal, LWM),
+    {struct,[{"name", proplists:get_value(node, Node)},
+             {"status", proplists:get_value(status, Node)},
+             {"reachable", Reachable},
+             {"ring_pct", proplists:get_value(ring_pct, Node)},
+             {"pending_pct", proplists:get_value(pending_pct, Node)},
+             {"mem_total", MemTotal},
+             {"mem_used", MemUsed},
+             {"mem_erlang", proplists:get_value(mem_erlang, Node)},
+             {"low_mem", LowMem},
+             {"me", proplists:get_value(node, Node) == node()},
+             {"claimant", proplists:get_value(node, Node) == Claimant},
+             {"action", proplists:get_value(action, Node)},
+             {"replacement", proplists:get_value(replacement, Node)}]}.
+
+
 
 get_nodes() ->
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
@@ -96,98 +153,55 @@ get_nodes() ->
 
 get_member_info({Node, Status}, Ring) ->
     RingSize = riak_core_ring:num_partitions(Ring),
-
     Indices = riak_core_ring:indices(Ring, Node),
     FutureIndices = riak_core_ring:future_indices(Ring, Node),
     PctRing = length(Indices) / RingSize,
     PctPending = length(FutureIndices) / RingSize,
 
-    %% try and get a list of all the vnodes running on the node
-    try rpc:call(Node, riak_control_session, get_my_info, []) of
-        {badrpc,nodedown} ->
-            ?MEMBER_INFO{node = Node,
-                         status = Status,
-                         reachable = false,
-                         vnodes = [],
-                         handoffs = [],
-                         ring_pct = PctRing,
-                         pending_pct = PctPending};
-        {badrpc,_Reason} ->
-            ?MEMBER_INFO{node = Node,
-                         status = incompatible,
-                         reachable = true,
-                         vnodes = [],
-                         handoffs = [],
-                         ring_pct = PctRing,
-                         pending_pct = PctPending};
-        MemberInfo = ?MEMBER_INFO{} ->
-            MemberInfo?MEMBER_INFO{status = Status,
-                                   ring_pct = PctRing,
-                                   pending_pct = PctPending};
-        MemberInfo0 = #member_info{} ->
-            %% Upgrade older member information record.
-            MemberInfo = upgrade_member_info(MemberInfo0),
-            MemberInfo?MEMBER_INFO{status = Status,
-                                   ring_pct = PctRing,
-                                   pending_pct = PctPending};
-        _ ->
-            %% default case where a record incompatibility causes a
-            %% failure matching the record format.
-            ?MEMBER_INFO{node = Node,
-                         status = incompatible,
-                         reachable = true,
-                         vnodes = [],
-                         handoffs = [],
-                         ring_pct = PctRing,
-                         pending_pct = PctPending}
-    catch
-        exit:R ->
-            logger:warning("rpc:call(~p, riak_control_session, get_my_info, []) failed with reason: ~p", [Node, R]),
-            ?MEMBER_INFO{node = Node,
-                         status = Status,
-                         reachable = false,
-                         vnodes = [],
-                         handoffs = [],
-                         ring_pct = PctRing,
-                         pending_pct = PctPending}
+    case rpc:call(Node, riak_kv_util, node_info_for_riak_control, []) of
+        {badrpc, nodedown} ->
+            [{node, Node},
+             {status, down}];
+        MemberInfo ->
+            MemberInfo ++ [{node, Node},
+                           {status, Status},
+                           {ring_pct, PctRing},
+                           {pending_pct, PctPending}
+                          ]
     end.
 
-
-%% @doc Turn a node into a proper struct for serialization.
--spec jsonify_node(member()) -> {struct, list()}.
-jsonify_node(Node) ->
-    LWM = 0.1,
-    MemUsed = Node?MEMBER_INFO.mem_used,
-    MemTotal = Node?MEMBER_INFO.mem_total,
-    Reachable = Node?MEMBER_INFO.reachable,
-    LowMem = low_mem(Reachable, MemUsed, MemTotal, LWM),
-    {struct,[{"name",Node?MEMBER_INFO.node},
-             {"status",Node?MEMBER_INFO.status},
-             {"reachable",Reachable},
-             {"ring_pct",Node?MEMBER_INFO.ring_pct},
-             {"pending_pct",Node?MEMBER_INFO.pending_pct},
-             {"mem_total",MemTotal},
-             {"mem_used",MemUsed},
-             {"mem_erlang",Node?MEMBER_INFO.mem_erlang},
-             {"low_mem",LowMem},
-             {"me",Node?MEMBER_INFO.node == node()},
-             {"action",Node?MEMBER_INFO.action},
-             {"replacement",Node?MEMBER_INFO.replacement}]}.
-
-%% @doc Determine if a node has low memory.
--spec low_mem(boolean(), number() | atom(), number() | atom(), number())
-    -> boolean().
-low_mem(Reachable, MemUsed, MemTotal, LWM) ->
-    case Reachable of
-        false ->
+low_mem(_Reachable = false, _, _, _) ->
+    0.0;
+low_mem(true, MemUsed, MemTotal, LWM) ->
+    case MemTotal of
+        undefined ->
             false;
-        true ->
-            %% There is a race where the node is online, but memsup is
-            %% still starting so memory is unavailable.
-            case MemTotal of
-                undefined ->
-                    false;
-                _ ->
-                    1.0 - (MemUsed/MemTotal) < LWM
-            end
+        _ ->
+            1.0 - (MemUsed/MemTotal) < LWM
     end.
+
+
+get_plan() ->
+    try riak_core_claimant:plan() of
+        {error, Error} ->
+            {error, Error};
+        {ok, Changes, NextRings} ->
+            case Changes of
+                [] ->
+                    {ok, [], []};
+                _ ->
+                    {ok, Changes, compute_final_ring_claim(NextRings)}
+            end
+    catch
+        _:_ ->
+            {error, unknown}
+    end.
+
+compute_final_ring_claim(Rings) ->
+    {_, FinalRing} = lists:last(Rings),
+    nodes_and_claim_percentages(FinalRing).
+
+nodes_and_claim_percentages(Ring) ->
+    Nodes = lists:keysort(2, riak_core_ring:all_member_status(Ring)),
+    [{Name, riak_core_console:pending_claim_percentage(Ring, Name)} ||
+        {Name, _} <- Nodes].

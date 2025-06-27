@@ -53,7 +53,8 @@
         shuffle_list/1,
         kv_ready/0,
         ngr_initial_timeout/0,
-        sys_monitor_count/0
+        sys_monitor_count/0,
+        node_info_for_riak_control/0
     ]).
 -export([report_hashtree_tokens/0, reset_hashtree_tokens/2]).
 
@@ -731,6 +732,53 @@ sys_monitor_count() ->
         end,
         0, processes()
     ).
+
+
+
+
+%% @doc Return current nodes information, to be sent to riak_control
+%% over http (see riak_kv_wm_cluster)
+-spec node_info_for_riak_control() -> proplists:proplist().
+node_info_for_riak_control() ->
+    {Total, Used} = node_memory_usage(),
+    Handoffs = node_handoff_status(),
+    VNodes = riak_core_vnode_manager:all_vnodes(),
+    ErlangMemory = proplists:get_value(total,erlang:memory()),
+    [{reachable, true},
+     {mem_total, Total},
+     {mem_used, Used},
+     {mem_erlang, ErlangMemory},
+     {vnodes, VNodes},
+     {handoffs, Handoffs}
+    ].
+
+node_memory_usage() ->
+    Mem = memsup:get_system_memory_data(),
+    Total = proplists:get_value(total_memory, Mem),
+    Free = proplists:get_value(free_memory, Mem),
+    Buffered =
+        case lists:keyfind(buffered_memory, 1, Mem) of
+            {_, BufferedMem} -> BufferedMem;
+            false -> 0
+        end,
+    Cached =
+        case lists:keyfind(cached_memory, 1, Mem) of
+            {_, CachedMem} -> CachedMem;
+            false -> 0
+        end,
+    {Total, Total - (Free + Cached + Buffered)}.
+
+format_transfer({status_v2, Handoff}) ->
+    Mod = proplists:get_value(mod, Handoff),
+    SrcPartition = proplists:get_value(src_partition, Handoff),
+    SrcNode = proplists:get_value(src_node, Handoff),
+    {Mod, SrcPartition, SrcNode}.
+
+node_handoff_status() ->
+    Transfers = riak_core_handoff_manager:status({direction, outbound}),
+    [format_transfer(T) || T <- lists:flatten(Transfers)].
+
+
 
 
 %% ===================================================================
